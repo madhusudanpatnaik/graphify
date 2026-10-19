@@ -129,12 +129,22 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
     done
 fi
 # Last resort: try python3 / python (works for system/venv installs on PATH).
+# On Windows (Git Bash, MSYS, Cygwin) python goes first: python.org installs
+# ship only python.exe, so python3 there is usually the Microsoft Store alias
+# stub, which opens a console window and exits 9009 each time it runs (#4563).
+# A Store install answers to python too, so trying it first loses nothing.
 if [ -z "$GRAPHIFY_PYTHON" ]; then
-    if command -v python3 >/dev/null 2>&1 && python3 -c "$_GFY_PROBE" 2>/dev/null; then
-        GRAPHIFY_PYTHON="python3"
-    elif command -v python >/dev/null 2>&1 && python -c "$_GFY_PROBE" 2>/dev/null; then
-        GRAPHIFY_PYTHON="python"
-    else
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) _GFY_PYTHONS="python python3" ;;
+        *)                    _GFY_PYTHONS="python3 python" ;;
+    esac
+    for _GFY_PY in $_GFY_PYTHONS; do
+        if command -v "$_GFY_PY" >/dev/null 2>&1 && "$_GFY_PY" -c "$_GFY_PROBE" 2>/dev/null; then
+            GRAPHIFY_PYTHON="$_GFY_PY"
+            break
+        fi
+    done
+    if [ -z "$GRAPHIFY_PYTHON" ]; then
         echo "[graphify hook] could not locate a Python with graphify installed. Add the graphify bin dir to PATH or re-run 'graphify hook install' from the env where graphify lives." >&2
         exit 0
     fi

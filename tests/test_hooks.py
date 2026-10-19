@@ -925,6 +925,74 @@ def test_uv_tool_env_honors_uv_tool_dir_and_windows_layout(tmp_path):
     assert f"RESOLVED={py}" in res.stdout, res.stdout + res.stderr
 
 
+def _last_resort_machine(tmp_path, uname, python3_ok, python_ok):
+    """Every probe before the last resort misses (#2852's machine, with no uv
+    tool env), `uname -s` reports `uname`, and python3/python answer the probe
+    as given. Each records its launch, as the Microsoft Store alias stub that
+    python3 resolves to on Windows opens a console window when run (#4563)."""
+    home, stub_bin = _broken_uv_machine(tmp_path)
+    fake_uname = stub_bin / "uname"
+    fake_uname.write_text(f"#!/bin/sh\necho {uname}\n", encoding="utf-8", newline="\n")
+    fake_uname.chmod(0o755)
+    for name, ok in (("python3", python3_ok), ("python", python_ok)):
+        py = stub_bin / name
+        py.write_text(
+            f"#!/bin/sh\necho {name} >> \"{tmp_path / 'launched'}\"\nexit {0 if ok else 9009}\n",
+            encoding="utf-8", newline="\n",
+        )
+        py.chmod(0o755)
+    return home, stub_bin
+
+
+def _launched(tmp_path):
+    marker = tmp_path / "launched"
+    return marker.read_text(encoding="utf-8").split() if marker.exists() else []
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or os.name == "nt",
+                    reason="sh required; the stubs shadow uname/python via PATH only on POSIX")
+@pytest.mark.parametrize("uname", ["MINGW64_NT-10.0-22631", "MSYS_NT-10.0", "CYGWIN_NT-10.0"])
+def test_last_resort_probes_python_before_python3_on_windows(tmp_path, uname):
+    """#4563: python.org installs ship only python.exe, so on Git Bash python3
+    is usually the Store alias stub, which flashes a console and exits 9009.
+    A working python must be adopted without python3 ever being launched."""
+    home, stub_bin = _last_resort_machine(tmp_path, uname, python3_ok=False, python_ok=True)
+    res = _detect_run(tmp_path, home, stub_bin)
+    assert res.returncode == 0, res.stderr
+    assert "RESOLVED=python\n" in res.stdout, res.stdout + res.stderr
+    assert _launched(tmp_path) == ["python"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or os.name == "nt",
+                    reason="sh required; the stubs shadow uname/python via PATH only on POSIX")
+def test_last_resort_still_falls_back_to_python3_on_windows(tmp_path):
+    """A python without graphify must not end the search: python3 is still tried."""
+    home, stub_bin = _last_resort_machine(tmp_path, "MINGW64_NT-10.0", python3_ok=True, python_ok=False)
+    res = _detect_run(tmp_path, home, stub_bin)
+    assert "RESOLVED=python3\n" in res.stdout, res.stdout + res.stderr
+    assert _launched(tmp_path) == ["python", "python3"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or os.name == "nt",
+                    reason="sh required; the stubs shadow uname/python via PATH only on POSIX")
+def test_last_resort_keeps_python3_first_off_windows(tmp_path):
+    """Elsewhere `python` can be a Python 2 or absent, so python3 stays first."""
+    home, stub_bin = _last_resort_machine(tmp_path, "Linux", python3_ok=True, python_ok=True)
+    res = _detect_run(tmp_path, home, stub_bin)
+    assert "RESOLVED=python3\n" in res.stdout, res.stdout + res.stderr
+    assert _launched(tmp_path) == ["python3"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or os.name == "nt",
+                    reason="sh required; the stubs shadow uname/python via PATH only on POSIX")
+def test_last_resort_still_fails_loudly_when_neither_python_works(tmp_path):
+    home, stub_bin = _last_resort_machine(tmp_path, "MINGW64_NT-10.0", python3_ok=False, python_ok=False)
+    res = _detect_run(tmp_path, home, stub_bin)
+    assert res.returncode == 0
+    assert "RESOLVED=" not in res.stdout
+    assert "could not locate" in res.stderr
+
+
 @pytest.mark.skipif(shutil.which("sh") is None, reason="sh required to run emitted probe chain")
 def test_uv_tool_env_without_graphify_still_fails_loudly(tmp_path):
     """The scan must not adopt a tool env whose python lacks graphify; the
