@@ -161,6 +161,17 @@ def _rust_use_module(argument: str) -> str:
     return clean.split("::")[-1].strip()
 
 
+def _rust_modules_in_scope(use_node, source: bytes) -> set[str]:
+    """The names of the `mod` items declared beside a `use`: in its file, or in the
+    body of the inline `mod { .. }` it sits in, which is a scope of its own."""
+    scope = use_node.parent
+    return {
+        _read_text(name, source)
+        for child in (scope.named_children if scope is not None else [])
+        if child.type == "mod_item" and (name := child.child_by_field_name("name")) is not None
+    }
+
+
 def _rust_use_bindings(node, source: bytes, prefix: str = "", self_path: str = "") -> list[tuple[str, int]]:
     """Each binding of a `use` tree, as the argument of a plain `use` that binds the same
     name, with its line: `a::{b, c as d, e::{self}, f::*}` gives `b`, `c as d`, `a::e`
@@ -367,6 +378,8 @@ def extract_rust(path: Path) -> dict:
 
     impl_bare_names: dict[int, str] = {}
     _scan_type_items(root)
+    # `mod` names declared in each scope a `use` sits in, keyed by the scope's span (#4564).
+    mods_by_scope: dict[tuple[int, int], set[str]] = {}
     local_type_names = frozenset(
         name
         for nid, names in declared_type_names.items()
@@ -750,8 +763,22 @@ def extract_rust(path: Path) -> dict:
                     # The name as written, for the corpus rewire (#4439): the id folds its
                     # case. Only for a path rooted in this crate: `serde::Serialize` or
                     # `std::fs::File` is never the corpus's own `Serialize` or `File`.
-                    if path.lstrip(": ").split("::")[0].strip() in ("crate", "self", "super"):
-                        edges[-1]["_rust_use_name"] = written.split(" as ")[0].strip()
+                    # A `mod` declared in scope is too (#4564): Rust resolves `item` in
+                    # `mod item; use item::X;` to it before any crate of that name, and
+                    # only a leading `::` (`::serde::X`) reaches past it to the crate.
+                    first = path.lstrip(": ").split("::")[0].strip()
+                    if first not in ("crate", "self", "super"):
+                        if path.lstrip().startswith("::"):
+                            return
+                        # Once per scope, not per `use`: a scope with N items and
+                        # N uses would otherwise rescan its items N times.
+                        scope = node.parent
+                        key = (scope.start_byte, scope.end_byte) if scope is not None else (-1, -1)
+                        if key not in mods_by_scope:
+                            mods_by_scope[key] = _rust_modules_in_scope(node, source)
+                        if first not in mods_by_scope[key]:
+                            return
+                    edges[-1]["_rust_use_name"] = written.split(" as ")[0].strip()
                 module_name = _rust_use_module(_read_text(arg, source))
                 grouped = arg.type in ("use_list", "scoped_use_list")
                 if module_name:

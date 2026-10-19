@@ -243,3 +243,34 @@ def test_a_use_from_another_crate_does_not_land_on_a_same_named_declaration(tmp_
         "src/a.rs": "pub struct File;\npub struct Command;\npub struct Serialize;\n",
         "src/user.rs": "use std::fs::File;\nuse std::{process::Command, io};\nuse serde::Serialize;\n"})
     assert _imports(result, "user.rs") == ["command", "file", "io", "serialize"]
+
+
+def test_a_use_rooted_at_a_child_module_lands_on_the_declaration(tmp_path: Path):
+    """#4564: `mod item; pub use item::Invoice;` names the child module declared
+    beside it, as `self::item::Invoice` would, so it is this crate's own item. It
+    dangled, and build minted an external `invoice` stub tied with the struct."""
+    result = _extract(tmp_path, {
+        "src/lib.rs": "pub mod model;\n", "src/model.rs": "mod item;\npub use item::Invoice;\n",
+        "src/model/item.rs": "pub struct Invoice(pub u64);\n"})
+    invoice = next(n["id"] for n in result["nodes"] if n["label"] == "Invoice")
+    assert _imports(result, "model.rs") == [invoice]
+
+
+def test_a_group_use_rooted_at_a_child_module_lands_on_each_declaration(tmp_path: Path):
+    result = _extract(tmp_path, {
+        "src/lib.rs": "mod item;\npub use item::{Invoice, Line};\n",
+        "src/item.rs": "pub struct Invoice;\npub struct Line;\n"})
+    ids = sorted(n["id"] for n in result["nodes"] if n["label"] in ("Invoice", "Line"))
+    assert set(ids) <= set(_imports(result, "lib.rs"))
+
+
+@pytest.mark.parametrize("lib", [
+    # `::serde` always names the crate, even beside a local `mod serde`.
+    "mod serde;\nuse ::serde::Serialize;\n",
+    # An inline `mod` is its own scope: `serde` there is the crate, not the
+    # `mod serde` declared outside it.
+    "mod serde;\nmod tests {\n    use serde::Serialize;\n}\n",
+])
+def test_a_use_whose_first_segment_is_not_a_module_in_scope_stays_unresolved(tmp_path: Path, lib: str):
+    result = _extract(tmp_path, {"src/lib.rs": lib, "src/serde.rs": "pub struct Serialize;\n"})
+    assert _imports(result, "lib.rs") == ["serialize"]
